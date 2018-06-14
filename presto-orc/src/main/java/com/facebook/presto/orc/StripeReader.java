@@ -40,7 +40,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
-import io.airlift.slice.FixedLengthSliceInput;
 import io.airlift.slice.Slices;
 
 import java.io.IOException;
@@ -58,6 +57,7 @@ import static com.facebook.presto.orc.checkpoint.Checkpoints.getStreamCheckpoint
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY;
 import static com.facebook.presto.orc.metadata.ColumnEncoding.ColumnEncodingKind.DICTIONARY_V2;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.BLOOM_FILTER;
+import static com.facebook.presto.orc.metadata.Stream.StreamKind.BLOOM_FILTER_UTF8;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DICTIONARY_COUNT;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.DICTIONARY_DATA;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.LENGTH;
@@ -245,12 +245,13 @@ public class StripeReader
         diskRanges = diskRangesBuilder.build();
 
         // read ranges
-        Map<StreamId, FixedLengthSliceInput> streamsData = orcDataSource.readFully(diskRanges);
+        Map<StreamId, OrcDataSourceInput> streamsData = orcDataSource.readFully(diskRanges);
 
         // transform streams to OrcInputStream
         ImmutableMap.Builder<StreamId, OrcInputStream> streamsBuilder = ImmutableMap.builder();
-        for (Entry<StreamId, FixedLengthSliceInput> entry : streamsData.entrySet()) {
-            streamsBuilder.put(entry.getKey(), new OrcInputStream(orcDataSource.getId(), entry.getValue(), decompressor, systemMemoryUsage));
+        for (Entry<StreamId, OrcDataSourceInput> entry : streamsData.entrySet()) {
+            OrcDataSourceInput sourceInput = entry.getValue();
+            streamsBuilder.put(entry.getKey(), new OrcInputStream(orcDataSource.getId(), sourceInput.getInput(), decompressor, systemMemoryUsage, sourceInput.getRetainedSizeInBytes()));
         }
         return streamsBuilder.build();
     }
@@ -362,14 +363,14 @@ public class StripeReader
         // read the footer
         byte[] tailBuffer = new byte[tailLength];
         orcDataSource.readFully(offset, tailBuffer);
-        try (InputStream inputStream = new OrcInputStream(orcDataSource.getId(), Slices.wrappedBuffer(tailBuffer).getInput(), decompressor, systemMemoryUsage)) {
+        try (InputStream inputStream = new OrcInputStream(orcDataSource.getId(), Slices.wrappedBuffer(tailBuffer).getInput(), decompressor, systemMemoryUsage, tailLength)) {
             return metadataReader.readStripeFooter(types, inputStream);
         }
     }
 
     static boolean isIndexStream(Stream stream)
     {
-        return stream.getStreamKind() == ROW_INDEX || stream.getStreamKind() == DICTIONARY_COUNT || stream.getStreamKind() == BLOOM_FILTER;
+        return stream.getStreamKind() == ROW_INDEX || stream.getStreamKind() == DICTIONARY_COUNT || stream.getStreamKind() == BLOOM_FILTER || stream.getStreamKind() == BLOOM_FILTER_UTF8;
     }
 
     private Map<Integer, List<HiveBloomFilter>> readBloomFilterIndexes(Map<StreamId, Stream> streams, Map<StreamId, OrcInputStream> streamsData)
@@ -382,6 +383,7 @@ public class StripeReader
                 OrcInputStream inputStream = streamsData.get(entry.getKey());
                 bloomFilters.put(stream.getColumn(), metadataReader.readBloomFilterIndexes(inputStream));
             }
+            // TODO: add support for BLOOM_FILTER_UTF8
         }
         return bloomFilters.build();
     }

@@ -106,6 +106,7 @@ public final class HttpRemoteTask
     private final Session session;
     private final String nodeId;
     private final PlanFragment planFragment;
+    private final OptionalInt totalPartitions;
 
     private final AtomicLong nextSplitId = new AtomicLong();
 
@@ -158,6 +159,7 @@ public final class HttpRemoteTask
             URI location,
             PlanFragment planFragment,
             Multimap<PlanNodeId, Split> initialSplits,
+            OptionalInt totalPartitions,
             OutputBuffers outputBuffers,
             HttpClient httpClient,
             Executor executor,
@@ -178,6 +180,7 @@ public final class HttpRemoteTask
         requireNonNull(nodeId, "nodeId is null");
         requireNonNull(location, "location is null");
         requireNonNull(planFragment, "planFragment is null");
+        requireNonNull(totalPartitions, "totalPartitions is null");
         requireNonNull(outputBuffers, "outputBuffers is null");
         requireNonNull(httpClient, "httpClient is null");
         requireNonNull(executor, "executor is null");
@@ -192,6 +195,7 @@ public final class HttpRemoteTask
             this.session = session;
             this.nodeId = nodeId;
             this.planFragment = planFragment;
+            this.totalPartitions = totalPartitions;
             this.outputBuffers.set(outputBuffers);
             this.httpClient = httpClient;
             this.executor = executor;
@@ -490,7 +494,8 @@ public final class HttpRemoteTask
                 session.toSessionRepresentation(),
                 fragment,
                 sources,
-                outputBuffers.get());
+                outputBuffers.get(),
+                totalPartitions);
 
         HttpUriBuilder uriBuilder = getHttpUriBuilder(taskStatus);
         Request request = preparePost()
@@ -528,7 +533,7 @@ public final class HttpRemoteTask
         boolean noMoreSplits = this.noMoreSplits.contains(planNodeId);
         Set<Lifespan> noMoreSplitsForLifespan = pendingNoMoreSplitsForLifespan.get(planNodeId);
         TaskSource element = null;
-        if (!splits.isEmpty() || noMoreSplits) {
+        if (!splits.isEmpty() || !noMoreSplitsForLifespan.isEmpty() || noMoreSplits) {
             element = new TaskSource(planNodeId, splits, noMoreSplitsForLifespan, noMoreSplits);
         }
         return element;

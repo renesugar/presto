@@ -18,6 +18,7 @@ import com.facebook.presto.cost.StatsProvider;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.block.SortOrder;
 import com.facebook.presto.spi.predicate.Domain;
+import com.facebook.presto.sql.parser.ParsingOptions;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
@@ -74,6 +75,8 @@ import static com.facebook.presto.sql.planner.assertions.MatchResult.NO_MATCH;
 import static com.facebook.presto.sql.planner.assertions.MatchResult.match;
 import static com.facebook.presto.sql.planner.assertions.StrictAssignedSymbolsMatcher.actualAssignments;
 import static com.facebook.presto.sql.planner.assertions.StrictSymbolsMatcher.actualOutputs;
+import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
+import static com.facebook.presto.sql.planner.plan.JoinNode.Type.LEFT;
 import static com.facebook.presto.sql.tree.SortItem.NullOrdering.FIRST;
 import static com.facebook.presto.sql.tree.SortItem.NullOrdering.UNDEFINED;
 import static com.facebook.presto.sql.tree.SortItem.Ordering.ASCENDING;
@@ -81,6 +84,7 @@ import static com.facebook.presto.sql.tree.SortItem.Ordering.DESCENDING;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static java.util.Collections.emptyMap;
 import static java.util.Collections.nCopies;
 import static java.util.Objects.requireNonNull;
 
@@ -189,6 +193,21 @@ public final class PlanMatchPattern
         aggregations.entrySet().forEach(
                 aggregation -> result.withAlias(aggregation.getKey(), new AggregationFunctionMatcher(aggregation.getValue())));
         return result;
+    }
+
+    public static PlanMatchPattern aggregation(
+            List<String> groupBy,
+            Map<String, ExpectedValueProvider<FunctionCall>> aggregations,
+            PlanMatchPattern source)
+    {
+        return aggregation(
+                ImmutableList.of(groupBy),
+                aggregations.entrySet().stream()
+                        .collect(toImmutableMap(entry -> Optional.of(entry.getKey()), Map.Entry::getValue)),
+                emptyMap(),
+                Optional.empty(),
+                Step.SINGLE,
+                source);
     }
 
     public static PlanMatchPattern aggregation(
@@ -326,6 +345,18 @@ public final class PlanMatchPattern
                         expectedDistributionType));
     }
 
+    public static PlanMatchPattern spatialJoin(String expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
+    {
+        return node(JoinNode.class, left, right).with(
+                new SpatialJoinMatcher(INNER, rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedFilter, new ParsingOptions()))));
+    }
+
+    public static PlanMatchPattern spatialLeftJoin(String expectedFilter, PlanMatchPattern left, PlanMatchPattern right)
+    {
+        return node(JoinNode.class, left, right).with(
+                new SpatialJoinMatcher(LEFT, rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedFilter, new ParsingOptions()))));
+    }
+
     public static PlanMatchPattern exchange(PlanMatchPattern... sources)
     {
         return node(ExchangeNode.class, sources);
@@ -368,9 +399,13 @@ public final class PlanMatchPattern
         return new SymbolAlias(alias);
     }
 
-    public static PlanMatchPattern filter(String predicate, PlanMatchPattern source)
+    public static PlanMatchPattern filter(String expectedPredicate, PlanMatchPattern source)
     {
-        Expression expectedPredicate = rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(predicate));
+        return filter(rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(expectedPredicate)), source);
+    }
+
+    public static PlanMatchPattern filter(Expression expectedPredicate, PlanMatchPattern source)
+    {
         return node(FilterNode.class, source).with(new FilterMatcher(expectedPredicate));
     }
 

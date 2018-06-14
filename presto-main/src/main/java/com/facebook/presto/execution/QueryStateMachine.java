@@ -15,7 +15,6 @@ package com.facebook.presto.execution;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.client.FailureInfo;
-import com.facebook.presto.execution.PlanFlattener.FlattenedPlan;
 import com.facebook.presto.execution.QueryExecution.QueryOutputInfo;
 import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.memory.VersionedMemoryPoolId;
@@ -26,6 +25,7 @@ import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ErrorCode;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
+import com.facebook.presto.spi.eventlistener.StageGcStatistics;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.planner.PlanFragment;
@@ -70,6 +70,7 @@ import static com.facebook.presto.execution.QueryState.QUEUED;
 import static com.facebook.presto.execution.QueryState.RUNNING;
 import static com.facebook.presto.execution.QueryState.STARTING;
 import static com.facebook.presto.execution.QueryState.TERMINAL_QUERY_STATES;
+import static com.facebook.presto.execution.QueryState.WAITING_FOR_RESOURCES;
 import static com.facebook.presto.execution.StageInfo.getAllStages;
 import static com.facebook.presto.memory.LocalMemoryManager.GENERAL_POOL;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_FOUND;
@@ -77,6 +78,7 @@ import static com.facebook.presto.spi.StandardErrorCode.USER_CANCELED;
 import static com.facebook.presto.util.Failures.toFailure;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.airlift.units.Duration.succinctNanos;
 import static java.util.Objects.requireNonNull;
@@ -111,6 +113,8 @@ public class QueryStateMachine
     private final AtomicLong currentTotalMemory = new AtomicLong();
     private final AtomicLong peakTotalMemory = new AtomicLong();
 
+    private final AtomicLong peakTaskTotalMemory = new AtomicLong();
+
     private final AtomicReference<DateTime> lastHeartbeat = new AtomicReference<>(DateTime.now());
     private final AtomicReference<DateTime> executionStartTime = new AtomicReference<>();
     private final AtomicReference<DateTime> endTime = new AtomicReference<>();
@@ -124,6 +128,9 @@ public class QueryStateMachine
 
     private final AtomicReference<Long> totalPlanningStartNanos = new AtomicReference<>();
     private final AtomicReference<Duration> totalPlanningTime = new AtomicReference<>();
+
+    private final AtomicReference<Long> resourceWaitingStartNanos = new AtomicReference<>();
+    private final AtomicReference<Duration> resourceWaitingTime = new AtomicReference<>();
 
     private final StateMachine<QueryState> queryState;
 
@@ -145,8 +152,6 @@ public class QueryStateMachine
 
     private final AtomicReference<Set<Input>> inputs = new AtomicReference<>(ImmutableSet.of());
     private final AtomicReference<Optional<Output>> output = new AtomicReference<>(Optional.empty());
-    private final AtomicReference<Optional<FlattenedPlan>> flattenedPlan = new AtomicReference<>(Optional.empty());
-
     private final StateMachine<Optional<QueryInfo>> finalQueryInfo;
 
     private final AtomicReference<ResourceGroupId> resourceGroup = new AtomicReference<>();
@@ -270,12 +275,18 @@ public class QueryStateMachine
         return peakTotalMemory.get();
     }
 
-    public void updateMemoryUsage(long deltaUserMemoryInBytes, long deltaTotalMemoryInBytes)
+    public long getPeakTaskTotalMemory()
+    {
+        return peakTaskTotalMemory.get();
+    }
+
+    public void updateMemoryUsage(long deltaUserMemoryInBytes, long deltaTotalMemoryInBytes, long taskTotalMemoryInBytes)
     {
         currentUserMemory.addAndGet(deltaUserMemoryInBytes);
         currentTotalMemory.addAndGet(deltaTotalMemoryInBytes);
         peakUserMemory.updateAndGet(currentPeakValue -> Math.max(currentUserMemory.get(), currentPeakValue));
         peakTotalMemory.updateAndGet(currentPeakValue -> Math.max(currentTotalMemory.get(), currentPeakValue));
+        peakTaskTotalMemory.accumulateAndGet(taskTotalMemoryInBytes, Math::max);
     }
 
     public void setResourceGroup(ResourceGroupId group)
@@ -333,6 +344,7 @@ public class QueryStateMachine
 
         long cumulativeUserMemory = 0;
         long userMemoryReservation = 0;
+        long totalMemoryReservation = 0;
 
         long totalScheduledTime = 0;
         long totalCpuTime = 0;
@@ -349,6 +361,8 @@ public class QueryStateMachine
         long outputPositions = 0;
 
         long physicalWrittenDataSize = 0;
+
+        ImmutableList.Builder<StageGcStatistics> stageGcStatistics = ImmutableList.builder();
 
         boolean fullyBlocked = rootStage.isPresent();
         Set<BlockedReason> blockedReasons = new HashSet<>();
@@ -369,6 +383,7 @@ public class QueryStateMachine
 
             cumulativeUserMemory += stageStats.getCumulativeUserMemory();
             userMemoryReservation += stageStats.getUserMemoryReservation().toBytes();
+            totalMemoryReservation += stageStats.getTotalMemoryReservation().toBytes();
             totalScheduledTime += stageStats.getTotalScheduledTime().roundTo(MILLISECONDS);
             totalCpuTime += stageStats.getTotalCpuTime().roundTo(MILLISECONDS);
             totalUserTime += stageStats.getTotalUserTime().roundTo(MILLISECONDS);
@@ -388,6 +403,8 @@ public class QueryStateMachine
             }
 
             physicalWrittenDataSize += stageStats.getPhysicalWrittenDataSize().toBytes();
+
+            stageGcStatistics.add(stageStats.getGcInfo());
 
             completeInfo = completeInfo && stageInfo.isCompleteInfo();
             operatorStatsSummary.addAll(stageInfo.getStageStats().getOperatorSummaries());
@@ -409,6 +426,7 @@ public class QueryStateMachine
 
                 elapsedTime.convertToMostSuccinctTimeUnit(),
                 queuedTime.get(),
+                resourceWaitingTime.get(),
                 analysisTime.get(),
                 distributedPlanningTime.get(),
                 totalPlanningTime.get(),
@@ -426,8 +444,10 @@ public class QueryStateMachine
 
                 cumulativeUserMemory,
                 succinctBytes(userMemoryReservation),
+                succinctBytes(totalMemoryReservation),
                 succinctBytes(getPeakUserMemoryInBytes()),
                 succinctBytes(getPeakTotalMemoryInBytes()),
+                succinctBytes(getPeakTaskTotalMemory()),
 
                 isScheduled,
 
@@ -446,6 +466,8 @@ public class QueryStateMachine
                 outputPositions,
 
                 succinctBytes(physicalWrittenDataSize),
+
+                stageGcStatistics.build(),
 
                 operatorStatsSummary.build());
 
@@ -472,7 +494,6 @@ public class QueryStateMachine
                 errorCode,
                 inputs.get(),
                 output.get(),
-                flattenedPlan.get(),
                 completeInfo,
                 getResourceGroup().map(ResourceGroupId::toString));
     }
@@ -512,11 +533,6 @@ public class QueryStateMachine
     {
         requireNonNull(output, "output is null");
         this.output.set(output);
-    }
-
-    public void setPlan(FlattenedPlan plan)
-    {
-        this.flattenedPlan.set(Optional.of(plan));
     }
 
     public Map<String, String> getSetSessionProperties()
@@ -604,16 +620,27 @@ public class QueryStateMachine
         return queryState.get().isDone();
     }
 
+    public boolean transitionToWaitingForResources()
+    {
+        queuedTime.compareAndSet(null, nanosSince(createNanos).convertToMostSuccinctTimeUnit());
+        resourceWaitingStartNanos.compareAndSet(null, tickerNanos());
+        return queryState.compareAndSet(QUEUED, WAITING_FOR_RESOURCES);
+    }
+
     public boolean transitionToPlanning()
     {
         queuedTime.compareAndSet(null, nanosSince(createNanos).convertToMostSuccinctTimeUnit());
+        resourceWaitingStartNanos.compareAndSet(null, tickerNanos());
+        resourceWaitingTime.compareAndSet(null, nanosSince(resourceWaitingStartNanos.get()).convertToMostSuccinctTimeUnit());
         totalPlanningStartNanos.compareAndSet(null, tickerNanos());
-        return queryState.compareAndSet(QUEUED, PLANNING);
+        return queryState.setIf(PLANNING, currentState -> currentState == QUEUED || currentState == WAITING_FOR_RESOURCES);
     }
 
     public boolean transitionToStarting()
     {
         queuedTime.compareAndSet(null, nanosSince(createNanos).convertToMostSuccinctTimeUnit());
+        resourceWaitingStartNanos.compareAndSet(null, tickerNanos());
+        resourceWaitingTime.compareAndSet(null, nanosSince(resourceWaitingStartNanos.get()).convertToMostSuccinctTimeUnit());
         totalPlanningStartNanos.compareAndSet(null, tickerNanos());
         totalPlanningTime.compareAndSet(null, nanosSince(totalPlanningStartNanos.get()));
 
@@ -622,8 +649,9 @@ public class QueryStateMachine
 
     public boolean transitionToRunning()
     {
-        Duration durationSinceCreation = nanosSince(createNanos).convertToMostSuccinctTimeUnit();
-        queuedTime.compareAndSet(null, durationSinceCreation);
+        queuedTime.compareAndSet(null, nanosSince(createNanos).convertToMostSuccinctTimeUnit());
+        resourceWaitingStartNanos.compareAndSet(null, tickerNanos());
+        resourceWaitingTime.compareAndSet(null, nanosSince(resourceWaitingStartNanos.get()).convertToMostSuccinctTimeUnit());
         totalPlanningStartNanos.compareAndSet(null, tickerNanos());
         totalPlanningTime.compareAndSet(null, nanosSince(totalPlanningStartNanos.get()));
         executionStartTime.compareAndSet(null, DateTime.now());
@@ -633,8 +661,9 @@ public class QueryStateMachine
 
     public boolean transitionToFinishing()
     {
-        Duration durationSinceCreation = nanosSince(createNanos).convertToMostSuccinctTimeUnit();
-        queuedTime.compareAndSet(null, durationSinceCreation);
+        queuedTime.compareAndSet(null, nanosSince(createNanos).convertToMostSuccinctTimeUnit());
+        resourceWaitingStartNanos.compareAndSet(null, tickerNanos());
+        resourceWaitingTime.compareAndSet(null, nanosSince(resourceWaitingStartNanos.get()).convertToMostSuccinctTimeUnit());
         totalPlanningStartNanos.compareAndSet(null, tickerNanos());
         totalPlanningTime.compareAndSet(null, nanosSince(totalPlanningStartNanos.get()));
         DateTime now = DateTime.now();
@@ -660,7 +689,7 @@ public class QueryStateMachine
                 {
                     transitionToFailed(throwable);
                 }
-            });
+            }, directExecutor());
         }
         else {
             transitionToFinished();
@@ -731,6 +760,7 @@ public class QueryStateMachine
     {
         Duration durationSinceCreation = nanosSince(createNanos).convertToMostSuccinctTimeUnit();
         queuedTime.compareAndSet(null, durationSinceCreation);
+        resourceWaitingTime.compareAndSet(null, succinctNanos(0));
         totalPlanningStartNanos.compareAndSet(null, tickerNanos());
         totalPlanningTime.compareAndSet(null, nanosSince(totalPlanningStartNanos.get()));
         DateTime now = DateTime.now();
@@ -846,7 +876,6 @@ public class QueryStateMachine
                 queryInfo.getErrorCode(),
                 queryInfo.getInputs(),
                 queryInfo.getOutput(),
-                queryInfo.getPlan(),
                 queryInfo.isCompleteInfo(),
                 queryInfo.getResourceGroupName());
         finalQueryInfo.compareAndSet(finalInfo, Optional.of(prunedQueryInfo));
@@ -861,6 +890,7 @@ public class QueryStateMachine
                 queryStats.getEndTime(),
                 queryStats.getElapsedTime(),
                 queryStats.getQueuedTime(),
+                queryStats.getResourceWaitingTime(),
                 queryStats.getAnalysisTime(),
                 queryStats.getDistributedPlanningTime(),
                 queryStats.getTotalPlanningTime(),
@@ -875,8 +905,10 @@ public class QueryStateMachine
                 queryStats.getCompletedDrivers(),
                 queryStats.getCumulativeUserMemory(),
                 queryStats.getUserMemoryReservation(),
+                queryStats.getTotalMemoryReservation(),
                 queryStats.getPeakUserMemoryReservation(),
                 queryStats.getPeakTotalMemoryReservation(),
+                queryStats.getPeakTaskTotalMemory(),
                 queryStats.isScheduled(),
                 queryStats.getTotalScheduledTime(),
                 queryStats.getTotalCpuTime(),
@@ -891,6 +923,7 @@ public class QueryStateMachine
                 queryStats.getOutputDataSize(),
                 queryStats.getOutputPositions(),
                 queryStats.getPhysicalWrittenDataSize(),
+                queryStats.getStageGcStatistics(),
                 ImmutableList.of()); // Remove the operator summaries as OperatorInfo (especially ExchangeClientStatus) can hold onto a large amount of memory
     }
 

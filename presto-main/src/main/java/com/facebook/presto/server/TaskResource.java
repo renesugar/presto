@@ -94,7 +94,8 @@ public class TaskResource
     private final TimeStat resultsRequestTime = new TimeStat();
 
     @Inject
-    public TaskResource(TaskManager taskManager,
+    public TaskResource(
+            TaskManager taskManager,
             SessionPropertyManager sessionPropertyManager,
             @ForAsyncHttp BoundedExecutor responseExecutor,
             @ForAsyncHttp ScheduledExecutorService timeoutExecutor)
@@ -129,7 +130,8 @@ public class TaskResource
                 taskId,
                 taskUpdateRequest.getFragment(),
                 taskUpdateRequest.getSources(),
-                taskUpdateRequest.getOutputIds());
+                taskUpdateRequest.getOutputIds(),
+                taskUpdateRequest.getTotalPartitions());
 
         if (shouldSummarize(uriInfo)) {
             taskInfo = taskInfo.summarize();
@@ -141,7 +143,8 @@ public class TaskResource
     @GET
     @Path("{taskId}")
     @Produces(MediaType.APPLICATION_JSON)
-    public void getTaskInfo(@PathParam("taskId") final TaskId taskId,
+    public void getTaskInfo(
+            @PathParam("taskId") final TaskId taskId,
             @HeaderParam(PRESTO_CURRENT_STATE) TaskState currentState,
             @HeaderParam(PRESTO_MAX_WAIT) Duration maxWait,
             @Context UriInfo uriInfo,
@@ -178,7 +181,8 @@ public class TaskResource
     @GET
     @Path("{taskId}/status")
     @Produces(MediaType.APPLICATION_JSON)
-    public void getTaskStatus(@PathParam("taskId") TaskId taskId,
+    public void getTaskStatus(
+            @PathParam("taskId") TaskId taskId,
             @HeaderParam(PRESTO_CURRENT_STATE) TaskState currentState,
             @HeaderParam(PRESTO_MAX_WAIT) Duration maxWait,
             @Context UriInfo uriInfo,
@@ -211,7 +215,8 @@ public class TaskResource
     @DELETE
     @Path("{taskId}")
     @Produces(MediaType.APPLICATION_JSON)
-    public TaskInfo deleteTask(@PathParam("taskId") TaskId taskId,
+    public TaskInfo deleteTask(
+            @PathParam("taskId") TaskId taskId,
             @QueryParam("abort") @DefaultValue("true") boolean abort,
             @Context UriInfo uriInfo)
     {
@@ -234,7 +239,8 @@ public class TaskResource
     @GET
     @Path("{taskId}/results/{bufferId}/{token}")
     @Produces(PRESTO_PAGES)
-    public void getResults(@PathParam("taskId") TaskId taskId,
+    public void getResults(
+            @PathParam("taskId") TaskId taskId,
             @PathParam("bufferId") OutputBufferId bufferId,
             @PathParam("token") final long token,
             @HeaderParam(PRESTO_MAX_SIZE) DataSize maxSize,
@@ -291,7 +297,8 @@ public class TaskResource
 
     @GET
     @Path("{taskId}/results/{bufferId}/{token}/acknowledge")
-    public void acknowledgeResults(@PathParam("taskId") TaskId taskId,
+    public void acknowledgeResults(
+            @PathParam("taskId") TaskId taskId,
             @PathParam("bufferId") OutputBufferId bufferId,
             @PathParam("token") final long token)
     {

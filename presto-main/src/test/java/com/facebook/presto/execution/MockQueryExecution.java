@@ -18,7 +18,6 @@ import com.facebook.presto.execution.StateMachine.StateChangeListener;
 import com.facebook.presto.memory.VersionedMemoryPoolId;
 import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.memory.MemoryPoolId;
-import com.facebook.presto.spi.resourceGroups.QueryType;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.sql.planner.Plan;
 import com.google.common.collect.ImmutableList;
@@ -111,6 +110,7 @@ public class MockQueryExecution
                         new DateTime(4),
                         new Duration(6, NANOSECONDS),
                         new Duration(5, NANOSECONDS),
+                        new Duration(31, NANOSECONDS),
                         new Duration(7, NANOSECONDS),
                         new Duration(8, NANOSECONDS),
 
@@ -131,6 +131,8 @@ public class MockQueryExecution
                         new DataSize(18, BYTE),
                         new DataSize(19, BYTE),
                         new DataSize(20, BYTE),
+                        new DataSize(21, BYTE),
+                        new DataSize(22, BYTE),
 
                         true,
                         new Duration(20, NANOSECONDS),
@@ -151,6 +153,7 @@ public class MockQueryExecution
 
                         new DataSize(30, BYTE),
 
+                        ImmutableList.of(),
                         ImmutableList.of()),
                 Optional.empty(),
                 Optional.empty(),
@@ -165,7 +168,6 @@ public class MockQueryExecution
                 null,
                 null,
                 ImmutableSet.of(),
-                Optional.empty(),
                 Optional.empty(),
                 state.isDone(),
                 Optional.empty());
@@ -214,6 +216,12 @@ public class MockQueryExecution
 
     @Override
     public long getUserMemoryReservation()
+    {
+        return memoryUsage;
+    }
+
+    @Override
+    public long getTotalMemoryReservation()
     {
         return memoryUsage;
     }
@@ -290,12 +298,6 @@ public class MockQueryExecution
     public void addFinalQueryInfoListener(StateChangeListener<QueryInfo> stateChangeListener)
     {
         throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public Optional<QueryType> getQueryType()
-    {
-        return Optional.empty();
     }
 
     private void fireStateChange()

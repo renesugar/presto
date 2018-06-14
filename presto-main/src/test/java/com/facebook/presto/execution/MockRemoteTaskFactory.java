@@ -19,8 +19,8 @@ import com.facebook.presto.connector.ConnectorId;
 import com.facebook.presto.execution.NodeTaskMap.PartitionedSplitCountTracker;
 import com.facebook.presto.execution.buffer.LazyOutputBuffer;
 import com.facebook.presto.execution.buffer.OutputBuffer;
+import com.facebook.presto.memory.DefaultQueryContext;
 import com.facebook.presto.memory.MemoryPool;
-import com.facebook.presto.memory.QueryContext;
 import com.facebook.presto.memory.context.SimpleLocalMemoryContext;
 import com.facebook.presto.metadata.Split;
 import com.facebook.presto.metadata.TableHandle;
@@ -48,7 +48,9 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import io.airlift.stats.TestingGcMonitor;
 import io.airlift.units.DataSize;
+import io.airlift.units.Duration;
 import org.joda.time.DateTime;
 
 import javax.annotation.concurrent.GuardedBy;
@@ -62,6 +64,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -83,6 +86,7 @@ import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class MockRemoteTaskFactory
         implements RemoteTaskFactory
@@ -121,7 +125,7 @@ public class MockRemoteTaskFactory
         for (Split sourceSplit : splits) {
             initialSplits.put(sourceId, sourceSplit);
         }
-        return createRemoteTask(TEST_SESSION, taskId, newNode, testFragment, initialSplits.build(), createInitialEmptyOutputBuffers(BROADCAST), partitionedSplitCountTracker, true);
+        return createRemoteTask(TEST_SESSION, taskId, newNode, testFragment, initialSplits.build(), OptionalInt.empty(), createInitialEmptyOutputBuffers(BROADCAST), partitionedSplitCountTracker, true);
     }
 
     @Override
@@ -131,11 +135,12 @@ public class MockRemoteTaskFactory
             Node node,
             PlanFragment fragment,
             Multimap<PlanNodeId, Split> initialSplits,
+            OptionalInt totalPartitions,
             OutputBuffers outputBuffers,
             PartitionedSplitCountTracker partitionedSplitCountTracker,
             boolean summarizeTaskInfo)
     {
-        return new MockRemoteTask(taskId, fragment, node.getNodeIdentifier(), executor, scheduledExecutor, initialSplits, partitionedSplitCountTracker);
+        return new MockRemoteTask(taskId, fragment, node.getNodeIdentifier(), executor, scheduledExecutor, initialSplits, totalPartitions, partitionedSplitCountTracker);
     }
 
     public static final class MockRemoteTask
@@ -171,15 +176,23 @@ public class MockRemoteTaskFactory
                 Executor executor,
                 ScheduledExecutorService scheduledExecutor,
                 Multimap<PlanNodeId, Split> initialSplits,
+                OptionalInt totalPartitions,
                 PartitionedSplitCountTracker partitionedSplitCountTracker)
         {
             this.taskStateMachine = new TaskStateMachine(requireNonNull(taskId, "taskId is null"), requireNonNull(executor, "executor is null"));
 
             MemoryPool memoryPool = new MemoryPool(new MemoryPoolId("test"), new DataSize(1, GIGABYTE));
-            MemoryPool memorySystemPool = new MemoryPool(new MemoryPoolId("testSystem"), new DataSize(1, GIGABYTE));
             SpillSpaceTracker spillSpaceTracker = new SpillSpaceTracker(new DataSize(1, GIGABYTE));
-            QueryContext queryContext = new QueryContext(taskId.getQueryId(), new DataSize(1, MEGABYTE), memoryPool, memorySystemPool, executor, scheduledExecutor, new DataSize(1, MEGABYTE), spillSpaceTracker);
-            this.taskContext = queryContext.addTaskContext(taskStateMachine, TEST_SESSION, true, true);
+            DefaultQueryContext queryContext = new DefaultQueryContext(taskId.getQueryId(),
+                    new DataSize(1, MEGABYTE),
+                    new DataSize(2, MEGABYTE),
+                    memoryPool,
+                    new TestingGcMonitor(),
+                    executor,
+                    scheduledExecutor,
+                    new DataSize(1, MEGABYTE),
+                    spillSpaceTracker);
+            this.taskContext = queryContext.addTaskContext(taskStateMachine, TEST_SESSION, true, true, totalPartitions);
 
             this.location = URI.create("fake://task/" + taskId);
 
@@ -234,7 +247,9 @@ public class MockRemoteTaskFactory
                             false,
                             new DataSize(0, BYTE),
                             new DataSize(0, BYTE),
-                            new DataSize(0, BYTE)),
+                            new DataSize(0, BYTE),
+                            0,
+                            new Duration(0, MILLISECONDS)),
                     DateTime.now(),
                     outputBuffer.getInfo(),
                     ImmutableSet.of(),
@@ -260,7 +275,9 @@ public class MockRemoteTaskFactory
                     false,
                     stats.getPhysicalWrittenDataSize(),
                     stats.getUserMemoryReservation(),
-                    stats.getSystemMemoryReservation());
+                    stats.getSystemMemoryReservation(),
+                    0,
+                    new Duration(0, MILLISECONDS));
         }
 
         private synchronized void updateSplitQueueSpace()

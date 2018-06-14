@@ -16,6 +16,7 @@ package com.facebook.presto.execution;
 import com.facebook.presto.operator.BlockedReason;
 import com.facebook.presto.operator.OperatorStats;
 import com.facebook.presto.operator.TableWriterOperator;
+import com.facebook.presto.spi.eventlistener.StageGcStatistics;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
@@ -46,6 +47,7 @@ public class QueryStats
 
     private final Duration elapsedTime;
     private final Duration queuedTime;
+    private final Duration resourceWaitingTime;
     private final Duration analysisTime;
     private final Duration distributedPlanningTime;
     private final Duration totalPlanningTime;
@@ -63,8 +65,10 @@ public class QueryStats
 
     private final double cumulativeUserMemory;
     private final DataSize userMemoryReservation;
+    private final DataSize totalMemoryReservation;
     private final DataSize peakUserMemoryReservation;
     private final DataSize peakTotalMemoryReservation;
+    private final DataSize peakTaskTotalMemory;
 
     private final boolean scheduled;
     private final Duration totalScheduledTime;
@@ -85,6 +89,8 @@ public class QueryStats
 
     private final DataSize physicalWrittenDataSize;
 
+    private final List<StageGcStatistics> stageGcStatistics;
+
     private final List<OperatorStats> operatorSummaries;
 
     @VisibleForTesting
@@ -96,6 +102,7 @@ public class QueryStats
         this.endTime = null;
         this.elapsedTime = null;
         this.queuedTime = null;
+        this.resourceWaitingTime = null;
         this.analysisTime = null;
         this.distributedPlanningTime = null;
         this.totalPlanningTime = null;
@@ -110,8 +117,10 @@ public class QueryStats
         this.completedDrivers = 0;
         this.cumulativeUserMemory = 0.0;
         this.userMemoryReservation = null;
+        this.totalMemoryReservation = null;
         this.peakUserMemoryReservation = null;
         this.peakTotalMemoryReservation = null;
+        this.peakTaskTotalMemory = null;
         this.scheduled = false;
         this.totalScheduledTime = null;
         this.totalCpuTime = null;
@@ -126,6 +135,7 @@ public class QueryStats
         this.outputDataSize = null;
         this.outputPositions = 0;
         this.physicalWrittenDataSize = null;
+        this.stageGcStatistics = null;
         this.operatorSummaries = null;
     }
 
@@ -138,6 +148,7 @@ public class QueryStats
 
             @JsonProperty("elapsedTime") Duration elapsedTime,
             @JsonProperty("queuedTime") Duration queuedTime,
+            @JsonProperty("resourceWaitingTime") Duration resourceWaitingTime,
             @JsonProperty("analysisTime") Duration analysisTime,
             @JsonProperty("distributedPlanningTime") Duration distributedPlanningTime,
             @JsonProperty("totalPlanningTime") Duration totalPlanningTime,
@@ -155,8 +166,10 @@ public class QueryStats
 
             @JsonProperty("cumulativeUserMemory") double cumulativeUserMemory,
             @JsonProperty("userMemoryReservation") DataSize userMemoryReservation,
+            @JsonProperty("totalMemoryReservation") DataSize totalMemoryReservation,
             @JsonProperty("peakUserMemoryReservation") DataSize peakUserMemoryReservation,
             @JsonProperty("peakTotalMemoryReservation") DataSize peakTotalMemoryReservation,
+            @JsonProperty("peakTaskTotalMemory") DataSize peakTaskTotalMemory,
 
             @JsonProperty("scheduled") boolean scheduled,
             @JsonProperty("totalScheduledTime") Duration totalScheduledTime,
@@ -177,6 +190,8 @@ public class QueryStats
 
             @JsonProperty("physicalWrittenDataSize") DataSize physicalWrittenDataSize,
 
+            @JsonProperty("stageGcStatistics") List<StageGcStatistics> stageGcStatistics,
+
             @JsonProperty("operatorSummaries") List<OperatorStats> operatorSummaries)
     {
         this.createTime = requireNonNull(createTime, "createTime is null");
@@ -186,6 +201,7 @@ public class QueryStats
 
         this.elapsedTime = elapsedTime;
         this.queuedTime = queuedTime;
+        this.resourceWaitingTime = resourceWaitingTime;
         this.analysisTime = analysisTime;
         this.distributedPlanningTime = distributedPlanningTime;
         this.totalPlanningTime = totalPlanningTime;
@@ -208,11 +224,13 @@ public class QueryStats
         this.blockedDrivers = blockedDrivers;
         checkArgument(completedDrivers >= 0, "completedDrivers is negative");
         this.completedDrivers = completedDrivers;
-
-        this.cumulativeUserMemory = requireNonNull(cumulativeUserMemory, "cumulativeUserMemory is null");
+        checkArgument(cumulativeUserMemory >= 0, "cumulativeUserMemory is negative");
+        this.cumulativeUserMemory = cumulativeUserMemory;
         this.userMemoryReservation = requireNonNull(userMemoryReservation, "userMemoryReservation is null");
+        this.totalMemoryReservation = requireNonNull(totalMemoryReservation, "totalMemoryReservation is null");
         this.peakUserMemoryReservation = requireNonNull(peakUserMemoryReservation, "peakUserMemoryReservation is null");
         this.peakTotalMemoryReservation = requireNonNull(peakTotalMemoryReservation, "peakTotalMemoryReservation is null");
+        this.peakTaskTotalMemory = requireNonNull(peakTaskTotalMemory, "peakTaskTotalMemory is null");
         this.scheduled = scheduled;
         this.totalScheduledTime = requireNonNull(totalScheduledTime, "totalScheduledTime is null");
         this.totalCpuTime = requireNonNull(totalCpuTime, "totalCpuTime is null");
@@ -234,6 +252,8 @@ public class QueryStats
         this.outputPositions = outputPositions;
 
         this.physicalWrittenDataSize = requireNonNull(physicalWrittenDataSize, "physicalWrittenDataSize is null");
+
+        this.stageGcStatistics = ImmutableList.copyOf(requireNonNull(stageGcStatistics, "stageGcStatistics is null"));
 
         this.operatorSummaries = ImmutableList.copyOf(requireNonNull(operatorSummaries, "operatorSummaries is null"));
     }
@@ -266,6 +286,12 @@ public class QueryStats
     public Duration getElapsedTime()
     {
         return elapsedTime;
+    }
+
+    @JsonProperty
+    public Duration getResourceWaitingTime()
+    {
+        return resourceWaitingTime;
     }
 
     @JsonProperty
@@ -374,6 +400,12 @@ public class QueryStats
     }
 
     @JsonProperty
+    public DataSize getTotalMemoryReservation()
+    {
+        return totalMemoryReservation;
+    }
+
+    @JsonProperty
     public DataSize getPeakUserMemoryReservation()
     {
         return peakUserMemoryReservation;
@@ -383,6 +415,12 @@ public class QueryStats
     public DataSize getPeakTotalMemoryReservation()
     {
         return peakTotalMemoryReservation;
+    }
+
+    @JsonProperty
+    public DataSize getPeakTaskTotalMemory()
+    {
+        return peakTaskTotalMemory;
     }
 
     @JsonProperty
@@ -486,6 +524,12 @@ public class QueryStats
                         .filter(stats -> stats.getOperatorType().equals(TableWriterOperator.class.getSimpleName()))
                         .mapToLong(stats -> stats.getInputDataSize().toBytes())
                         .sum());
+    }
+
+    @JsonProperty
+    public List<StageGcStatistics> getStageGcStatistics()
+    {
+        return stageGcStatistics;
     }
 
     @JsonProperty
